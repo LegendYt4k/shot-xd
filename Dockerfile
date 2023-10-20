@@ -1,61 +1,54 @@
-FROM ubuntu:20.04
+FROM ubuntu:20.04 as base
 
-ENV BRANCH 2.2
-ENV RSTUDIO 1.4.1103
+### Stage 1 - add/remove packages ###
 
-ENV DEBIAN_FRONTEND noninteractive
+# Ensure scripts are available for use in next command
+COPY ./container/root/scripts/* /scripts/
+COPY ./container/root/usr/local/bin/* /usr/local/bin/
 
-# Install.
-RUN \
-  apt-get update && \
-  apt-get -y dist-upgrade && \
-  apt-get install -y software-properties-common && \
-  add-apt-repository -y ppa:opencpu/opencpu-2.2 && \
-  apt-get update && \
-  apt-get install -y wget make devscripts apache2-dev apache2 libapreq2-dev r-base r-base-dev libapparmor-dev libcurl4-openssl-dev libprotobuf-dev protobuf-compiler libcairo2-dev xvfb xauth xfonts-base curl libssl-dev libxml2-dev libicu-dev pkg-config libssh2-1-dev locales apt-utils && \
-  useradd -ms /bin/bash builder
+# - Symlink variant-specific scripts to default location
+# - Upgrade base security packages, then clean packaging leftover
+# - Add S6 for zombie reaping, boot-time coordination, signal transformation/distribution: @see https://github.com/just-containers/s6-overlay#known-issues-and-workarounds
+# - Add goss for local, serverspec-like testing
+RUN /bin/bash -e /scripts/ubuntu_apt_config.sh && \
+    /bin/bash -e /scripts/ubuntu_apt_cleanmode.sh && \
+    ln -s /scripts/clean_ubuntu.sh /clean.sh && \
+    ln -s /scripts/security_updates_ubuntu.sh /security_updates.sh && \
+    echo 'debconf debconf/frontend select Noninteractive' | debconf-set-selections && \
+    /bin/bash -e /security_updates.sh && \
+    apt-get install -yqq \
+      curl \
+      gpg \
+      apt-transport-https \
+    && \
+    /bin/bash -e /scripts/install_s6.sh && \
+    /bin/bash -e /scripts/install_goss.sh && \
+    apt-get remove --purge -yq \
+        curl \
+        gpg \
+    && \
+    /bin/bash -e /clean.sh && \
+    # out of order execution, has a dpkg error if performed before the clean script, so keeping it here,
+    apt-get remove --purge --auto-remove systemd --allow-remove-essential -y
 
-# Different from debian
-RUN apt-get install -y language-pack-en-base
+# Overlay the root filesystem from this repo
+COPY ./container/root /
 
-USER builder
 
-RUN \
-  cd ~ && \
-  wget --quiet https://github.com/opencpu/opencpu-server/archive/v${BRANCH}.tar.gz && \
-  tar xzf v${BRANCH}.tar.gz && \
-  cd opencpu-server-${BRANCH} && \
-  dpkg-buildpackage -us -uc
+### Stage 2 --- collapse layers ###
 
-USER root
+FROM scratch
+COPY --from=base / .
 
-RUN \
-  apt-get install -y libapache2-mod-r-base && \
-  dpkg -i /home/builder/opencpu-lib_*.deb && \
-  dpkg -i /home/builder/opencpu-server_*.deb
+# Use in multi-phase builds, when an init process requests for the container to gracefully exit, so that it may be committed
+# Used with alternative CMD (worker.sh), leverages supervisor to maintain long-running processes
+ENV SIGNAL_BUILD_STOP=99 \
+    S6_BEHAVIOUR_IF_STAGE2_FAILS=2 \
+    S6_KILL_FINISH_MAXTIME=5000 \
+    S6_KILL_GRACETIME=3000
 
-RUN \
-  apt-get install -y gdebi-core git sudo && \
-  wget --quiet https://download2.rstudio.org/server/bionic/amd64/rstudio-server-${RSTUDIO}-amd64.deb && \
-  gdebi --non-interactive rstudio-server-${RSTUDIO}-amd64.deb && \
-  rm -f rstudio-server-${RSTUDIO}-amd64.deb && \
-  echo "server-app-armor-enabled=0" >> /etc/rstudio/rserver.conf
+RUN goss -g goss.base.yaml validate
 
-# Prints apache logs to stdout
-RUN \
-  ln -sf /proc/self/fd/1 /var/log/apache2/access.log && \
-  ln -sf /proc/self/fd/1 /var/log/apache2/error.log && \
-  ln -sf /proc/self/fd/1 /var/log/opencpu/apache_access.log && \
-  ln -sf /proc/self/fd/1 /var/log/opencpu/apache_error.log
-
-# Set opencpu password so that we can login
-RUN \
-  echo "opencpu:opencpu" | chpasswd
-
-# Apache ports
-EXPOSE 80
-EXPOSE 443
-EXPOSE 8004
-
-# Start non-daemonized webserver
-CMD /usr/lib/rstudio-server/bin/rserver && apachectl -DFOREGROUND
+# NOTE: intentionally NOT using s6 init as the entrypoint
+# This would prevent container debugging if any of those service crash
+CMD ["/bin/bash", "/run.sh"]
