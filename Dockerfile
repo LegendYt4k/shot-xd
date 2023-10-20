@@ -12,12 +12,3 @@ RUN apt-get update -y && apt-get install -y \
     && apt-get clean
 
 # Create a working directory
-WORKDIR /app
-
-# Install Python packages required for your project
-
-# Expose a port for Jupyter
-EXPOSE 8888
-
-# Start Jupyter Notebook
-CMD ["jupyter", "notebook", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--allow-root"]
