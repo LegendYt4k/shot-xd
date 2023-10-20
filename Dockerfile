@@ -15,8 +15,6 @@ RUN apt-get update -y && apt-get install -y \
 WORKDIR /app
 
 # Install Python packages required for your project
-COPY requirements.txt /app
-RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Expose a port for Jupyter
 EXPOSE 8888
